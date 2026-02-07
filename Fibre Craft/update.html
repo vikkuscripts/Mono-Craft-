@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <base target="_top">
+    <meta charset="utf-8">
+    <title>Update Payment</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <!-- Bootstrap -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css" />
+
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.4/css/all.min.css" />
+    <style>
+        body {
+            background-color: #f7f7f7;
+            font-size: 14px;
+        }
+
+        .app-container {
+            max-width: 600px;
+            margin: 30px auto;
+            padding: 0 15px;
+        }
+
+        .card {
+            border: none;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+            border-radius: 6px;
+        }
+
+        .card-header {
+            background: #007bff;
+            color: white;
+            font-weight: 600;
+            border-radius: 6px 6px 0 0 !important;
+        }
+
+        /* overlay + popup */
+        #overlay {
+            position: fixed;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(0, 0, 0, 0.45);
+            z-index: 999;
+        }
+
+        .overlay-inner {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            background: transparent;
+        }
+
+        .spinner {
+            width: 34px;
+            height: 34px;
+            border-radius: 50%;
+            border: 4px solid rgba(255, 255, 255, 0.25);
+            border-top-color: white;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            to {
+                transform: rotate(360deg);
+            }
+        }
+
+        .popup-card {
+            display: none;
+            position: fixed;
+            z-index: 1000;
+            left: 50%;
+            transform: translateX(-50%);
+            top: 22%;
+            min-width: 260px;
+            padding: 16px;
+            border-radius: 10px;
+            text-align: center;
+            color: white;
+        }
+
+        .popup-card.success {
+            background: #0b8a3a;
+        }
+
+        .popup-card.error {
+            background: #b30000;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            border-bottom: 1px dashed #eee;
+            padding-bottom: 4px;
+        }
+
+        .info-label {
+            font-weight: 600;
+            color: #555;
+        }
+
+        .info-val {
+            font-weight: bold;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div class="app-container">
+        <div class="card">
+            <div class="card-header text-center">
+                ADD PAYMENT (EMI / PART)
+            </div>
+            <div class="card-body">
+
+                <!-- Search Section -->
+                <div class="form-group">
+                    <label>Find Order (Reference Code)</label>
+                    <div class="input-group">
+                        <input type="text" id="refSearch" class="form-control"
+                            placeholder="Enter Ref Code (e.g. R10045)">
+                        <div class="input-group-append">
+                            <button class="btn btn-primary" onclick="searchOrder()">Search</button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Info Section (Hidden By Default) -->
+                <div id="orderInfo" style="display:none; margin-top:20px;">
+                    <h6 class="text-primary mb-3">Order Details</h6>
+
+                    <div class="info-row">
+                        <span class="info-label">Customer</span>
+                        <span class="info-val" id="disp_customer"></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Order Date</span>
+                        <span class="info-val" id="disp_date"></span>
+                    </div>
+
+                    <div class="info-row mt-3">
+                        <span class="info-label">Grand Total</span>
+                        <span class="info-val" id="disp_total"></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Already Paid</span>
+                        <span class="info-val text-success" id="disp_paid"></span>
+                    </div>
+                    <div class="info-row">
+                        <span class="info-label">Balance Due</span>
+                        <span class="info-val text-danger" id="disp_balance"></span>
+                    </div>
+
+                    <hr>
+
+                    <!-- Payment Input -->
+                    <div class="form-group mt-3">
+                        <label style="font-weight:bold; color:#0b8a3a;">Add New Payment Amount (₹)</label>
+                        <input type="number" id="newPayment" class="form-control form-control-lg" placeholder="0">
+                        <small class="text-muted">This amount will be ADDED to the 'Already Paid' amount.</small>
+                    </div>
+
+                    <button class="btn btn-success btn-lg btn-block mt-4" onclick="submitPayment()">
+                        Update Payment & Regenerate PDF
+                    </button>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- overlay + popup -->
+    <div id="overlay" aria-hidden="true">
+        <div class="overlay-inner" role="status" aria-live="polite">
+            <div class="spinner" aria-hidden="true"></div>
+            <div style="color:white; font-weight:600">Processing...</div>
+        </div>
+    </div>
+
+    <div id="popup-success" class="popup-card success" role="alert">
+        <div style="font-size:30px;">✔</div>
+        <div id="popup-success-text">Saved successfully</div>
+        <div style="margin-top:12px;">
+            <a id="newPdfLink" href="#" target="_blank" class="btn btn-light btn-sm" style="display:none">View New
+                PDF</a>
+            <button class="btn btn-light btn-sm ml-2" onclick="hidePopup()">Close</button>
+        </div>
+    </div>
+
+    <div id="popup-error" class="popup-card error" role="alert">
+        <div style="font-size:30px;">✖</div>
+        <div id="popup-error-text">Error message</div>
+        <div style="margin-top:12px;">
+            <button class="btn btn-light btn-sm" onclick="hidePopup()">Close</button>
+        </div>
+    </div>
+
+    <!-- JS -->
+    <script>
+        let currentRefCode = null;
+        let popupTimeout;
+
+        function showOverlay() { document.getElementById("overlay").style.display = "flex"; }
+        function hideOverlay() { document.getElementById("overlay").style.display = "none"; }
+
+        function showPopup(type, msg, url) {
+            hidePopup();
+            const id = type === "error" ? "popup-error" : "popup-success";
+            const txt = type === "error" ? "popup-error-text" : "popup-success-text";
+            document.getElementById(id).style.display = "block";
+            document.getElementById(txt).textContent = msg;
+
+            if (type === "success" && url) {
+                const btn = document.getElementById("newPdfLink");
+                btn.href = url;
+                btn.style.display = "inline-block";
+            }
+        }
+
+        function hidePopup() {
+            document.getElementById("popup-success").style.display = "none";
+            document.getElementById("popup-error").style.display = "none";
+        }
+
+        function searchOrder() {
+            const ref = document.getElementById("refSearch").value.trim();
+            if (!ref) return;
+
+            showOverlay();
+            google.script.run
+                .withSuccessHandler(renderOrder)
+                .withFailureHandler(err => {
+                    hideOverlay();
+                    showPopup("error", "Failed: " + err.message);
+                })
+                .getOrdersByRefCode(ref);
+        }
+
+        function renderOrder(data) {
+            hideOverlay();
+            if (!data || data.error || (Array.isArray(data) && data.length === 0)) {
+                showPopup("error", "Order not found");
+                document.getElementById("orderInfo").style.display = "none";
+                return;
+            }
+
+            // Handle object structure from getOrdersByRefCode
+            // It returns { header: {}, items: [], totals: {} } OR array
+            let header, totals;
+            if (data.header) {
+                header = data.header;
+                totals = data.totals;
+            } else if (Array.isArray(data) && data.length > 0) {
+                header = data[0];
+                totals = {
+                    GrandTotal: Number(header["Footer Grand Total"] || header["GrandTotal"] || 0),
+                    AdvanceAmount: Number(header["AdvanceAmount"] || 0)
+                };
+            } else {
+                showPopup("error", "Invalid data structure");
+                return;
+            }
+
+            document.getElementById("orderInfo").style.display = "block";
+            currentRefCode = header["RefCode"]; // store exact case
+
+            setText("disp_customer", header["CustomerName"] || header["Person Name"] || header["customerName"]);
+            setText("disp_date", formatDate(header["OrderDate"]));
+
+            const gTotal = Number(totals.GrandTotal || 0);
+            const paid = Number(totals.AdvanceAmount || 0);
+            const bal = gTotal - paid;
+
+            setText("disp_total", "₹ " + gTotal.toFixed(2));
+            setText("disp_paid", "₹ " + paid.toFixed(2));
+            setText("disp_balance", "₹ " + bal.toFixed(2));
+
+            document.getElementById("newPayment").value = "";
+        }
+
+        function submitPayment() {
+            const amt = document.getElementById("newPayment").value;
+            if (!amt || Number(amt) <= 0) {
+                alert("Please enter a valid payment amount");
+                return;
+            }
+
+            if (!confirm("Are you sure you want to add ₹" + amt + " to this order? This will regenerate the PDF.")) return;
+
+            showOverlay();
+            google.script.run
+                .withSuccessHandler(res => {
+                    hideOverlay();
+                    if (res.success) {
+                        showPopup("success", res.message, res.pdfUrl);
+                        // Refresh view
+                        searchOrder();
+                    } else {
+                        showPopup("error", res.message);
+                    }
+                })
+                .withFailureHandler(err => {
+                    hideOverlay();
+                    showPopup("error", err.message);
+                })
+                .addPaymentToOrder(currentRefCode, amt);
+        }
+
+        function setText(id, val) {
+            document.getElementById(id).textContent = val || "";
+        }
+
+        function formatDate(iso) {
+            if (!iso) return "";
+            try {
+                const d = new Date(iso);
+                return d.toLocaleDateString("en-IN");
+            } catch (e) { return iso; }
+        }
+
+    </script>
+
+</body>
+
+</html>
