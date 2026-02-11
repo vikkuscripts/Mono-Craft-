@@ -92,6 +92,10 @@
             background: #b30000;
         }
 
+        .popup-card.confirm {
+            background: #007bff;
+        }
+
         .info-label {
             font-size: 0.85rem;
             color: #6c757d;
@@ -127,8 +131,8 @@
             </div>
             <div class="card-body">
 
-                <!-- Search Section -->
-                <div class="form-group row justify-content-center">
+                <!-- Search Section (Hidden by default as per request) -->
+                <div class="form-group row justify-content-center" style="display:none;">
                     <div class="col-md-6">
                         <label>Find Order (Reference Code)</label>
                         <div class="input-group">
@@ -140,8 +144,6 @@
                         </div>
                     </div>
                 </div>
-
-                <hr>
 
                 <!-- Info Section (Hidden By Default) -->
                 <div id="orderInfo" style="display:none;">
@@ -173,38 +175,11 @@
                             </div>
                         </div>
                     </div>
-
                     <!-- Balance & Status -->
                     <div class="alert alert-warning text-center">
                         Balance Due: <strong id="disp_balance" style="font-size:1.2rem;">--</strong>
                     </div>
 
-                    <!-- Payment History Table (Moved Up) -->
-                    <div id="historySection" class="mt-4 mb-4" style="display:none;">
-                        <h5 class="text-secondary d-flex justify-content-between align-items-center">
-                            <span>Payment History</span>
-                            <span class="badge badge-success px-3 py-2" style="font-size: 0.9rem;">
-                                Already Paid: <span id="hist_total_paid">--</span>
-                            </span>
-                        </h5>
-                        <div class="table-responsive">
-                            <table class="table table-bordered table-sm text-center bg-white">
-                                <thead class="thead-light">
-                                    <tr>
-                                        <th>Payment Type</th>
-                                        <th>Payment Amount</th>
-                                        <th>Remarks</th>
-                                        <th>Payment Date</th>
-                                        <th>Document Upload</th>
-                                        <th>Invoice</th>
-                                    </tr>
-                                </thead>
-                                <tbody id="historyTableBody">
-                                    <!-- JS Populated -->
-                                </tbody>
-                            </table>
-                        </div>
-                    </div>
 
                     <hr>
                     <h5 class="mb-3 text-secondary">New Payment Details</h5>
@@ -213,12 +188,16 @@
                     <div class="row">
                         <!-- Payment Type -->
                         <div class="col-md-3 form-group">
-                            <label>Payment Type</label>
+                            <label>Payment Mode</label>
                             <select id="payType" class="form-control">
-                                <option value="Cash">Cash</option>
-                                <option value="UPI">UPI / Online</option>
+                                <option value="Bank">Bank</option>
+                                <option value="UPI">UPI</option>
                                 <option value="Cheque">Cheque</option>
-                                <option value="Bank Transfer">Bank Transfer</option>
+                                <option value="NEFT">NEFT</option>
+                                <option value="GOOGLE PAY">GOOGLE PAY</option>
+                                <option value="IMPS">IMPS</option>
+                                <option value="BHARAT PAY SCANNER">BHARAT PAY SCANNER</option>
+                                <option value="KOTAK BANK SCANNER">KOTAK BANK SCANNER</option>
                                 <option value="Other">Other</option>
                             </select>
                         </div>
@@ -259,6 +238,32 @@
                     </div>
 
 
+                    <!-- Payment History Table (Moved Up) -->
+                    <div id="historySection" class="mt-4 mb-4" style="display:none;">
+                        <h5 class="text-secondary d-flex justify-content-between align-items-center">
+                            <span>Payment History</span>
+                            <span class="badge badge-success px-3 py-2" style="font-size: 0.9rem;">
+                                Total Paid: <span id="hist_total_paid">--</span>
+                            </span>
+                        </h5>
+                        <div class="table-responsive">
+                            <table class="table table-bordered table-sm text-center bg-white">
+                                <thead class="thead-light">
+                                    <tr>
+                                        <th>Payment Type</th>
+                                        <th>Payment Amount</th>
+                                        <th>Remarks</th>
+                                        <th>Payment Date</th>
+                                        <th>Document Upload</th>
+                                        <th>Invoice</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="historyTableBody">
+                                    <!-- JS Populated -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
                 </div>
             </div>
         </div>
@@ -289,10 +294,28 @@
             </div>
         </div>
 
+        <div id="popup-confirm" class="popup-card confirm" role="alert">
+            <div style="font-size:30px;"><i class="fas fa-question-circle"></i></div>
+            <div id="popup-confirm-text">Are you sure?</div>
+            <div style="margin-top:12px;">
+                <button class="btn btn-light btn-sm" onclick="processPaymentAfterConfirm()">Yes, Save</button>
+                <button class="btn btn-outline-light btn-sm ml-2" onclick="hidePopup()">Cancel</button>
+            </div>
+        </div>
+
         <!-- JS -->
         <script>
             let currentRefCode = null;
             let popupTimeout;
+
+            // Handle URL parameter for pre-filling Ref Code
+            window.addEventListener('load', () => {
+                const preFilledRef = "<?= paymentUpdate ?>";
+                if (preFilledRef && preFilledRef !== "undefined") {
+                    document.getElementById("refSearch").value = preFilledRef;
+                    searchOrder();
+                }
+            });
 
             // Set default date to today
             document.getElementById("payDate").valueAsDate = new Date();
@@ -317,6 +340,7 @@
             function hidePopup() {
                 document.getElementById("popup-success").style.display = "none";
                 document.getElementById("popup-error").style.display = "none";
+                document.getElementById("popup-confirm").style.display = "none";
             }
 
             function searchOrder() {
@@ -420,6 +444,8 @@
                 document.getElementById("payAmount").value = "";
             }
 
+            let pendingPayload = null;
+
             async function submitPayment() {
                 const amt = document.getElementById("payAmount").value;
                 const type = document.getElementById("payType").value;
@@ -427,31 +453,26 @@
                 const fileInput = document.getElementById("payFile");
 
                 if (!amt || Number(amt) <= 0) {
-                    alert("Please enter a valid payment amount");
+                    showPopup("error", "Please enter a valid payment amount");
                     return;
                 }
                 if (!date) {
-                    alert("Please select a date");
+                    showPopup("error", "Please select a date");
                     return;
                 }
 
-                if (!confirm("Add ₹" + amt + " (" + type + ") to order " + currentRefCode + "?")) return;
-
-                showOverlay();
-
-                // Handle File
+                // Prepare file data
                 let fileObj = null;
                 if (fileInput.files.length > 0) {
                     try {
                         fileObj = await readFileAsBase64(fileInput.files[0]);
                     } catch (e) {
-                        hideOverlay();
-                        alert("Error reading file: " + e.message);
+                        showPopup("error", "Error reading file: " + e.message);
                         return;
                     }
                 }
 
-                const payload = {
+                pendingPayload = {
                     amount: amt,
                     type: type,
                     date: date,
@@ -459,12 +480,22 @@
                     file: fileObj
                 };
 
+                // Show custom confirmation popup
+                const confirmText = `Add ₹${amt} (${type}) to order ${currentRefCode}?`;
+                document.getElementById("popup-confirm-text").textContent = confirmText;
+                document.getElementById("popup-confirm").style.display = "block";
+            }
+
+            function processPaymentAfterConfirm() {
+                if (!pendingPayload) return;
+                hidePopup();
+                showOverlay();
+
                 google.script.run
                     .withSuccessHandler(res => {
                         hideOverlay();
                         if (res.success) {
                             showPopup("success", res.message, res.pdfUrl);
-                            // Refresh view
                             searchOrder();
                         } else {
                             showPopup("error", res.message);
@@ -474,7 +505,9 @@
                         hideOverlay();
                         showPopup("error", err.message);
                     })
-                    .addPaymentToOrder(currentRefCode, payload);
+                    .addPaymentToOrder(currentRefCode, pendingPayload);
+
+                pendingPayload = null;
             }
 
             function readFileAsBase64(file) {
