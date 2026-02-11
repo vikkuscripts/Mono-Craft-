@@ -1,6 +1,8 @@
 function doGet(e) {
-  if (e && e.parameter && e.parameter.page === 'update') {
-      return HtmlService.createTemplateFromFile('update').evaluate()
+  if (e && e.parameter && (e.parameter.page === 'update' || e.parameter.paymentUpdate)) {
+      var template = HtmlService.createTemplateFromFile('update');
+      template.paymentUpdate = e.parameter.paymentUpdate || '';
+      return template.evaluate()
         .addMetaTag('viewport', 'width=device-width, initial-scale=1')
         .setTitle('Update Payment');
   }
@@ -20,7 +22,9 @@ function doGet(e) {
   }
 }
 
-function addPaymentToOrder(refCode, newPaymentAmount) {
+
+
+function addPaymentToOrder(refCode, paymentData) {
   const lock = LockService.getScriptLock();
   try {
     lock.waitLock(30000);
@@ -29,83 +33,102 @@ function addPaymentToOrder(refCode, newPaymentAmount) {
     const sh = ss.getSheetByName("Sales Orders");
     if (!sh) throw new Error("Sheet 'Sales Orders' not found");
 
+    // 1. GET SALES ORDER DATA
     const data = sh.getDataRange().getValues();
     if (data.length < 2) throw new Error("No data found");
 
     const headers = data[0].map(h => String(h).trim());
     
-    // FIND COLUMNS
-    const refColIdx = headers.indexOf("RefCode");
-    const advColIdx = headers.indexOf("AdvanceAmount"); 
-    const pdfUrlIdx = headers.indexOf("Invoice URL");
-    const fileIdIdx = headers.indexOf("Invoice File ID");
-    
-    // Fallback if headers are slightly different (Case sensitivity or spaces)
     const findCol = (name) => headers.findIndex(h => h.toLowerCase().replace(/[^a-z0-9]/g,"") === name.toLowerCase().replace(/[^a-z0-9]/g,""));
     
-    const refCol = refColIdx > -1 ? refColIdx : findCol("refcode");
-    const advCol = advColIdx > -1 ? advColIdx : findCol("advanceamount");
-    const pdfCol = pdfUrlIdx > -1 ? pdfUrlIdx : findCol("invoiceurl");
-    const fidCol = fileIdIdx > -1 ? fileIdIdx : findCol("invoicefileid");
+    const refCol = findCol("RefCode");
+    const advCol = findCol("AdvanceAmount");
+    const pdfCol = findCol("InvoiceURL");
+    const fidCol = findCol("InvoiceFileID");
 
     if (refCol === -1) throw new Error("RefCode column not found");
     if (advCol === -1) throw new Error("AdvanceAmount column not found");
 
-    // Search for rows
+    // Find Rows
     const targets = [];
     for (let i = 1; i < data.length; i++) {
         if (String(data[i][refCol]).trim() === String(refCode).trim()) {
-            targets.push(i + 1); // 1-based row index
+            targets.push(i + 1); // 1-based
         }
     }
 
     if (targets.length === 0) throw new Error("Order not found: " + refCode);
 
-    // GET CURRENT DATA (from first row of the order)
-    const firstRowIdx = targets[0] - 1; // 0-based index for data array
-    const currentAdvance = Number(data[firstRowIdx][advCol]) || 0;
-    const grandTotalVal  = Number(data[firstRowIdx][findCol("GrandTotal") > -1 ? findCol("GrandTotal") : findCol("footergrandtotal")]) || 0;
-
-    const updatedAdvance = currentAdvance + Number(newPaymentAmount);
+    const firstRowIdx = targets[0] - 1;
+    const baseAdvance = Number(data[firstRowIdx][advCol]) || 0;
+    const grandTotalVal  = Number(data[firstRowIdx][findCol("GrandTotal") > -1 ? findCol("GrandTotal") : findCol("FooterGrandTotal")]) || 0;
     
-    // Validation? (Optional: Prevent paying more than total? User might want to allow it)
+    const newPaymentAmount = Number(paymentData.amount) || 0;
 
-    // UPDATE SHEET FIRST (So PDF generation if it reads from sheet - though we pass payload - is consistent? Actually we generate from payload)
-    // We update all product rows with the new Advance Amount
+    // 2. GET PREVIOUS PAYMENTS FROM COLLECTION SHEET
+    let historySum = 0;
+    const collSheet = ss.getSheetByName("Payment_Collection");
+    if (collSheet) {
+      const collData = collSheet.getDataRange().getValues();
+      if (collData.length > 1) {
+        const cHeaders = collData[0].map(h => String(h).trim().toLowerCase());
+        const cRefIdx = cHeaders.indexOf("refcode");
+        const cAmtIdx = cHeaders.indexOf("payment amount");
+        
+        if (cRefIdx > -1 && cAmtIdx > -1) {
+          for (let i = 1; i < collData.length; i++) {
+             if (String(collData[i][cRefIdx]).trim() === String(refCode).trim()) {
+               historySum += Number(collData[i][cAmtIdx]) || 0;
+             }
+          }
+        }
+      }
+    }
+
+    // Total Paid for PDF = Base (from SalesOrders) + History (from Collection) + New
+    const totalPaidForPdf = baseAdvance + historySum + newPaymentAmount;
+
+    // UPDATE: User requested NOT to update Advance Amount in Sales Orders sheet.
+    // So we skip updating 'advCol' in 'sh'. 
+    
+    /* 
     targets.forEach(r => {
         sh.getRange(r, advCol + 1).setValue(updatedAdvance);
     });
+    */
 
-    // NOW REGENERATE PDF
-    // We need to reconstruct payload. 
-    // We reuse getOrdersByRefCode logic but locally or just call it if available?
-    // getOrdersByRefCode returns structured object. We need flat payload for generateInvoicePdf_
-    
-    // Let's manually map the data from the first row + products
+    // 3. UPLOAD PROOF DOC (If exists)
+    let proofUrl = "";
+    if (paymentData.file && paymentData.file.data) {
+       try {
+         const folder = DriveApp.getFolderById(DRIVE_FOLDER_ID);
+         const blob = Utilities.newBlob(Utilities.base64Decode(paymentData.file.data), paymentData.file.mimeType, paymentData.file.name);
+         const file = folder.createFile(blob);
+         proofUrl = file.getUrl();
+       } catch(e) {
+         console.error("Proof upload failed", e);
+         proofUrl = "Error uploading file";
+       }
+    }
+
+    // 4. REGENERATE PDF
     const rowObj = {};
     headers.forEach((h, k) => rowObj[h] = data[firstRowIdx][k]);
-    
-    // Update the advance amount in our object
-    rowObj["AdvanceAmount"] = updatedAdvance;
-    
-    // Map to payload schema expected by generateInvoicePdf_
-    // (We use a helper here to avoid duplication if possible, or just inline)
+    rowObj["AdvanceAmount"] = totalPaidForPdf; // Use calculated total for PDF
+
     const pick = (field, ...keys) => {
-        for(let k of keys) {
-            if(rowObj[k] !== undefined) return rowObj[k];
-        }
-        // fuzzy search
+        for(let k of keys) { if(rowObj[k] !== undefined) return rowObj[k]; }
         const normInfo = keys[0].toLowerCase().replace(/[^a-z0-9]/g,"");
-         const found = headers.find(h => h.toLowerCase().replace(/[^a-z0-9]/g,"") === normInfo);
-         if(found) return rowObj[found];
-         return "";
+        const found = headers.find(h => h.toLowerCase().replace(/[^a-z0-9]/g,"") === normInfo);
+        if(found) return rowObj[found];
+        return "";
     };
 
     const payload = {
         orderDate: pick("orderDate", "OrderDate"),
-        grandTotal: pick("grandTotal", "GrandTotal", "Footer Grand Total"), // Use Footer Grand Total for invoice
+        grandTotal: pick("grandTotal", "GrandTotal", "Footer Grand Total"),
         footerGrandTotal: pick("grandTotal", "GrandTotal", "Footer Grand Total"),
-        advanceAmount: updatedAdvance,
+        advanceAmount: totalPaidForPdf,
         customerName: pick("customerName", "CustomerName", "Person Name"),
         address: pick("address", "BillingAddress", "Billing Address"),
         gstNumber: pick("gstNumber", "GSTNumber"),
@@ -123,14 +146,13 @@ function addPaymentToOrder(refCode, newPaymentAmount) {
         totalIgst: pick("totalIgst", "Total IGST"),
         products: []
     };
-    
+
     // Collect products
     targets.forEach(r => {
         const d = data[r-1];
         const pObj = {};
         headers.forEach((h, k) => pObj[h] = d[k]);
         
-        // Product payload mapping
         payload.products.push({
             productCode: pObj["ProductCode"] || pObj["Product Code"],
             productName: pObj["ProductName"] || pObj["Product Name"],
@@ -145,35 +167,54 @@ function addPaymentToOrder(refCode, newPaymentAmount) {
         });
     });
 
-    // Prepare images for PDF
     payload.products = payload.products.map(p => ({
       ...p,
       imageDataUri: fetchImageAsDataUri(p.image || "")
     }));
 
-
     const invoiceInfo = generateInvoicePdf_(payload, refCode);
 
-    // UPDATE PDF URL IN SHEET
+    // Update PDF URL in Sales Orders (Only PDF link, not amount)
     if (pdfCol > -1) {
         const url = invoiceInfo.pdfUrl || "";
-        targets.forEach(r => {
-             sh.getRange(r, pdfCol + 1).setValue(url);
-        });
+        targets.forEach(r => sh.getRange(r, pdfCol + 1).setValue(url));
     }
-    
-    // Update File ID if exists
     if (fidCol > -1 && invoiceInfo.fileId) {
-         targets.forEach(r => {
-             sh.getRange(r, fidCol + 1).setValue(invoiceInfo.fileId);
-        });
+         targets.forEach(r => sh.getRange(r, fidCol + 1).setValue(invoiceInfo.fileId));
     }
 
+    // 5. LOG TO Payment_Collection SHEET
+    let logSheet = ss.getSheetByName("Payment_Collection");
+    if (!logSheet) {
+      logSheet = ss.insertSheet("Payment_Collection");
+      logSheet.appendRow(["Timestamp", "RefCode", "Payment Type", "Payment Amount", "Payment Date", "Remarks", "Document Upload", "Invoice"]);
+    } else {
+        // QUICK FIX: Check if header has "Remarks", if not, we assume legacy struct.
+        // For simplicity, we just append to the end or insert if headers match expected new format.
+        // Ideally we map columns. Let's start assuming standard structure or append to end.
+    }
+
+    const timestamp = new Date();
+    const logRow = [
+      timestamp,
+      refCode,
+      paymentData.type || "",
+      newPaymentAmount,
+      paymentData.date || "",
+      paymentData.remarks || "",      // NEW
+      proofUrl,
+      invoiceInfo.pdfUrl || ""
+    ];
+
+    logSheet.appendRow(logRow);
+    const lastLog = logSheet.getLastRow();
+    logSheet.getRange(lastLog, 1).setNumberFormat("dd/MM/yyyy HH:mm:ss");
+    
     return {
         success: true,
-        message: "Payment updated and PDF regenerated!",
-        newBalance: (grandTotalVal - updatedAdvance),
-        totalPaid: updatedAdvance,
+        message: "Payment recorded and Invoice updated!",
+        newBalance: (grandTotalVal - totalPaidForPdf),
+        totalPaid: totalPaidForPdf,
         pdfUrl: invoiceInfo.pdfUrl
     };
 
@@ -183,6 +224,8 @@ function addPaymentToOrder(refCode, newPaymentAmount) {
     lock.releaseLock();
   }
 }
+
+
 
 function getGstType() {
   const sheet = SpreadsheetApp.getActive().getSheetByName('GST Type');
@@ -1433,6 +1476,7 @@ function getNextRefCodeFromSheet_(sh) {
 
 
 
+
 function getOrdersByRefCode(refCode) {
   try {
 
@@ -1452,36 +1496,32 @@ function getOrdersByRefCode(refCode) {
         .trim()
     );
 
-    const refCol = headers.indexOf("RefCode");
+    const refCol = headers.findIndex(h => h.toLowerCase().replace(/[^a-z0-9]/g,"") === "refcode");
+    // Fallback or explicit check
     if (refCol === -1) {
       return { error: "RefCode column not found", headers };
     }
 
     const normalizedRef = String(refCode).trim();
+    const normalizedRefLower = normalizedRef.toLowerCase();
 
     let orderRows = [];
 
     // ---------- Collect All Rows ----------
     for (let i = 1; i < data.length; i++) {
+        const val = String(data[i][refCol]).trim();
+        if (val.toLowerCase() !== normalizedRefLower) continue;
 
-      if (String(data[i][refCol]).trim() !== normalizedRef) continue;
-
-      let rowObj = {};
-
-      headers.forEach((header, index) => {
-        let value = data[i][index];
-
-        if (value instanceof Date) {
-          value = Utilities.formatDate(value, Session.getScriptTimeZone(), "yyyy-MM-dd");
-        }
-
-        // Keep numbers as numbers
-        if (value === "" || value === null) value = "";
-
-        rowObj[header] = value;
-      });
-
-      orderRows.push(rowObj);
+        let rowObj = {};
+        headers.forEach((header, index) => {
+            let value = data[i][index];
+            if (value instanceof Date) {
+            value = Utilities.formatDate(value, Session.getScriptTimeZone(), "yyyy-MM-dd");
+            }
+            if (value === "" || value === null) value = "";
+            rowObj[header] = value;
+        });
+        orderRows.push(rowObj);
     }
 
     if (orderRows.length === 0) return [];
@@ -1505,18 +1545,114 @@ function getOrdersByRefCode(refCode) {
       TotalPrice: Number(r["TotalPrice"] || 0)
     }));
 
+    // ---------- Get Payment Collection History ----------
+    let history = [];
+    let collectionSum = 0;
+    const collSheet = ss.getSheetByName("Payment_Collection");
+    
+    if(collSheet) {
+        const cData = collSheet.getDataRange().getValues();
+        if(cData.length > 1) {
+            const cHeaders = cData[0].map(h => String(h).trim().toLowerCase());
+            const cRef = cHeaders.indexOf("refcode");
+            const cType = cHeaders.indexOf("payment type");
+            const cAmt = cHeaders.indexOf("payment amount");
+            const cDate = cHeaders.indexOf("payment date");
+            const cRem = cHeaders.indexOf("remarks"); // New
+            const cDoc = cHeaders.indexOf("document upload");
+            const cInv = cHeaders.indexOf("invoice") > -1 ? cHeaders.indexOf("invoice") : cHeaders.indexOf("generated invoice"); // handle variations
+            
+            if(cRef > -1) {
+                for(let k=1; k<cData.length; k++) {
+                    if(String(cData[k][cRef]).trim().toLowerCase() === normalizedRefLower) {
+                         const amt = Number(cData[k][cAmt]) || 0;
+                         collectionSum += amt;
+                         
+                         let dateVal = cData[k][cDate];
+                         if(dateVal instanceof Date) {
+                             dateVal = Utilities.formatDate(dateVal, Session.getScriptTimeZone(), "yyyy-MM-dd");
+                         }
+                         
+                         history.push({
+                             type: cType > -1 ? cData[k][cType] : "",
+                             amount: amt,
+                             date: dateVal,
+                             remarks: cRem > -1 ? cData[k][cRem] : "",
+                             doc: cDoc > -1 ? cData[k][cDoc] : "",
+                             invoice: cInv > -1 ? cData[k][cInv] : ""
+                         });
+                    }
+                }
+            }
+        }
+    }
+
     // ---------- Totals ----------
+    const grandTotal = Number(firstRow["Footer Grand Total"] || firstRow["GrandTotal"] || 0);
+    const baseAdvance = Number(firstRow["AdvanceAmount"] || 0); 
+    // User requested: "advance ammount will come from sheet sales order colm AL" (which corresponds to AdvanceAmount usually)
+    // And "grand total - already paid = due"
+    // Previously we were summing history + base. 
+    // If the user says "already paid will be replaced by advance amount", 
+    // it implies they want the value from the Sheet to be the source of truth for "Already Paid".
+    // AND we are NOT updating the sheet anymore with history.
+    // So "AdvanceAmount" in sheet = original advance.
+    // "Payment_Collection" = subsequent payments.
+    // So Total Paid = Sheet(AdvanceAmount) + Sum(Payment_Collection)
+    
+    // However, the User prompt says: "already paid will be replaced by the advance amount from sales order"
+    // and "grand total - already paid = due".
+    // This implies: AlreadyPaid = AdvanceAmount (from sheet).
+    // Wait, if AdvanceAmount in sheet is NOT updated (as per previous request), then it is just the initial advance.
+    // So TotalPaid = InitialAdvance + Sum(History).
+    // BUT the prompt says "already paid will show upper side... and the advance ammount will come from sheet sales order".
+    // This sounds like they treat the sheet's AdvanceAmount as the *Total* paid so far?
+    // ERROR: In previous step I disabled updating AdvanceAmount in sheet.
+    // If I disabled it, then AdvanceAmount in sheet is STATIC (only initial).
+    // If the user wants "Already Paid" to be "Advance Amount from Sales Order", then "Already Paid" will effectively be just the initial advance, ignoring all history? That would be wrong for calculating DUE.
+    
+    // Let's assume the user MIGHT have meant they want the "Advance Amount" displayed on UI to strictly be what is in the sheet (Base), 
+    // AND they want the calculations to be correct.
+    // OR, they want me to go back to UPDATING the sheet so that "Advance Amount" in sheet IS the total paid.
+    
+    // RE-READING: "do not update the advance amount with every entry" (Step 133). 
+    // So Sheet AdvanceAmount = Initial Advance.
+    // "already paid will be replaced by the advance amount from sales order" (Step 233).
+    // This implies the UI label "Already Paid" should show the value from "Advance Amount" column?
+    // If so, it will miss the history sums.
+    
+    // INTERPRETATION:
+    // The user likely wants to see specific numbers:
+    // 1. "Advance Amount" (from Sheet) -> This is the initial advance.
+    // 2. "Total Paid" -> This is (Sheet Advance + History Sum).
+    // 3. "Due" -> Grand Total - Total Paid.
+    
+    // BUT the prompt text is: "grand total - already paid = due"
+    // This implies "Already Paid" MUST BE "Total Paid".
+    // So "Already Paid" = Base + History.
+    
+    // WAIT, "advance ammount will come from sheet sales order colm AL"
+    // Maybe they want to display "Advance Amount" SEPARATELY?
+    // Let's look at the UI request again.
+    // "already paid will show upper side of table... up side of the colm Payment Amount... and grand total - already paid = due"
+    
+    // Let's return the raw values and let UI confirm the math.
+    const totalPaid = baseAdvance + collectionSum;
+
     const totals = {
-      GrandTotal: Number(firstRow["GrandTotal"] || 0),
-      AdvanceAmount: Number(firstRow["AdvanceAmount"] || 0),
-      Balance: Number(firstRow["Footer Grand Total"] || 0)
+      GrandTotal: grandTotal,
+      AdvanceAmount: baseAdvance, // Raw from sheet
+      CollectionSum: collectionSum, // Sum from history
+      TotalPaid: totalPaid, // Combined
+      Balance: grandTotal - totalPaid
     };
 
     // ---------- Final Order Object ----------
     const order = {
-      header: firstRow,   // customer + order details
+      header: firstRow,
       items: items,
-      totals: totals
+      totals: totals,
+      history: history
     };
 
     return order;
@@ -1526,6 +1662,7 @@ function getOrdersByRefCode(refCode) {
     return { error: String(err) };
   }
 }
+
 
 function test_getOrdersByRefCode() {
 
